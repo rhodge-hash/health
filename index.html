@@ -57,6 +57,11 @@
                 </button>
             </div>
         </div>
+
+        <div class="bg-gray-800 p-6 rounded-xl mb-8">
+            <label for="requiredChecksInput" class="block text-sm font-medium text-gray-300 mb-1">Required Checks (comma-separated names)</label>
+            <input type="text" id="requiredChecksInput" placeholder="e.g., Vercel, Build, Deploy" class="w-full p-2 rounded-lg bg-gray-700 text-white border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
         
         <!-- Status Display Section -->
         <div id="loading" class="text-center text-gray-400 my-8 hidden">
@@ -94,12 +99,19 @@
                 <div class="mt-4">
                     <p class="text-gray-400">Overall Status:</p>
                     <p id="overallStatus" class="text-2xl font-bold mt-1 flex items-center gap-2"></p>
+                    <div id="progressBarContainer" class="w-full bg-gray-700 rounded-full h-2.5 mt-2">
+                        <div id="progressBar" class="bg-blue-600 h-2.5 rounded-full" style="width: 0%;"></div>
+                    </div>
+                    <p id="progressText" class="text-sm text-gray-400 mt-1"></p>
                 </div>
             </div>
 
             <!-- Checks and Actions Card -->
             <div class="card p-6 rounded-xl">
-                <h2 class="text-2xl font-semibold mb-4">Checks & Actions</h2>
+                <h2 class="text-2xl font-semibold mb-4 flex justify-between items-center">
+                    <span>Checks & Actions</span>
+                    <a id="viewAllLink" href="#" target="_blank" class="text-sm text-blue-400 hover:underline">View All on GitHub</a>
+                </h2>
                 <div class="overflow-x-auto">
                     <table class="w-full text-left">
                         <thead>
@@ -140,6 +152,7 @@
             const repoInput = document.getElementById('repoInput');
             const branchInput = document.getElementById('branchInput');
             const tokenInput = document.getElementById('tokenInput');
+            const requiredChecksInput = document.getElementById('requiredChecksInput');
             const fetchBtn = document.getElementById('fetchBtn');
             const dashboard = document.getElementById('dashboard');
             const loading = document.getElementById('loading');
@@ -152,16 +165,21 @@
             const latestCommitEl = document.getElementById('latestCommit');
             const overallStatusEl = document.getElementById('overallStatus');
             const checksAndActionsBody = document.getElementById('checksAndActionsBody');
+            const progressBar = document.getElementById('progressBar');
+            const progressText = document.getElementById('progressText');
+            const viewAllLink = document.getElementById('viewAllLink');
 
             // Load saved values from localStorage
-            repoInput.value = localStorage.getItem('githubRepo') || '';
+            repoInput.value = localStorage.getItem('githubRepo') || 'rhodge-hash/health';
             branchInput.value = localStorage.getItem('githubBranch') || 'main';
             tokenInput.value = localStorage.getItem('githubToken') || '';
+            requiredChecksInput.value = localStorage.getItem('githubRequiredChecks') || '';
 
             fetchBtn.addEventListener('click', () => {
                 const repo = repoInput.value.trim();
                 const branch = branchInput.value.trim();
                 const token = tokenInput.value.trim();
+                const requiredChecks = requiredChecksInput.value.trim().split(',').map(s => s.trim().toLowerCase()).filter(s => s);
 
                 if (!repo || !branch) {
                     alert('Please enter a GitHub repository name and a branch name.');
@@ -172,11 +190,12 @@
                 localStorage.setItem('githubRepo', repo);
                 localStorage.setItem('githubBranch', branch);
                 localStorage.setItem('githubToken', token);
+                localStorage.setItem('githubRequiredChecks', requiredChecksInput.value.trim());
                 
-                fetchData(repo, branch, token);
+                fetchData(repo, branch, token, requiredChecks);
             });
 
-            async function fetchData(repo, branch, token) {
+            async function fetchData(repo, branch, token, requiredChecks) {
                 loading.classList.remove('hidden');
                 errorDiv.classList.add('hidden');
                 dashboard.classList.add('hidden');
@@ -211,7 +230,7 @@
                     const workflowsRes = await fetch(`https://api.github.com/repos/${repo}/actions/runs?branch=${branch}&per_page=5`, { headers });
                     const workflowsData = await workflowsRes.json();
 
-                    renderDashboard(repo, branch, latestCommitSha, statusesData, checksData, workflowsData);
+                    renderDashboard(repo, branch, latestCommitSha, statusesData, checksData, workflowsData, requiredChecks);
 
                 } catch (err) {
                     console.error('API Fetch Error:', err);
@@ -223,7 +242,7 @@
                 }
             }
 
-            function renderDashboard(repo, branch, commitSha, statusesData, checksData, workflowsData) {
+            function renderDashboard(repo, branch, commitSha, statusesData, checksData, workflowsData, requiredChecks) {
                 // Show dashboard and hide instructions
                 dashboard.classList.remove('hidden');
                 instructionsDiv.classList.add('hidden');
@@ -231,9 +250,7 @@
                 repoNameEl.textContent = repo;
                 branchNameEl.textContent = branch;
                 latestCommitEl.textContent = commitSha ? commitSha.substring(0, 7) : 'N/A';
-                
-                let overallStatus = 'pending';
-                let overallStatusText = 'Pending...';
+                viewAllLink.href = `https://github.com/${repo}/actions/runs?branch=${branch}`;
                 
                 // Combine and sort all data sources
                 const allChecksAndActions = [
@@ -242,27 +259,46 @@
                     ...(workflowsData.workflow_runs || []).map(item => ({ ...item, type: 'workflow_run' }))
                 ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)); // Sort by time
 
-                // Determine overall status
-                const hasFailed = allChecksAndActions.some(item => 
-                    (item.conclusion === 'failure' || item.conclusion === 'cancelled' || item.conclusion === 'stale' || item.state === 'error' || item.state === 'failure') ||
-                    (item.status === 'completed' && item.conclusion !== 'success')
-                );
-                const hasPending = allChecksAndActions.some(item => item.status !== 'completed' || item.state === 'pending' || item.state === 'in_progress');
-                const hasSucceeded = allChecksAndActions.some(item => item.conclusion === 'success' || item.state === 'success');
+                // Filter based on required checks
+                const relevantChecks = requiredChecks.length > 0 ?
+                    allChecksAndActions.filter(item => 
+                        requiredChecks.some(name => (item.context || item.name || item.workflow_name || '').toLowerCase().includes(name))
+                    ) : allChecksAndActions;
+
+                let overallStatus = 'pending';
+                let overallStatusText = 'Pending...';
                 
-                if (hasFailed) {
-                    overallStatus = 'failure';
-                    overallStatusText = 'Some checks failed';
-                } else if (hasPending) {
+                if (relevantChecks.length > 0) {
+                    const latestRelevantCheck = relevantChecks[0];
+                    const status = latestRelevantCheck.conclusion || latestRelevantCheck.status || latestRelevantCheck.state;
+                    
+                    if (status === 'success' || status === 'completed') {
+                        overallStatus = 'success';
+                        overallStatusText = 'All required checks passed';
+                    } else if (status === 'failure' || status === 'cancelled' || status === 'stale' || status === 'error') {
+                        overallStatus = 'failure';
+                        overallStatusText = 'A required check failed';
+                    } else {
+                        overallStatus = 'pending';
+                        overallStatusText = 'Pending checks...';
+                    }
+                } else {
                     overallStatus = 'pending';
-                    overallStatusText = 'Pending checks...';
-                } else if (hasSucceeded) {
-                    overallStatus = 'success';
-                    overallStatusText = 'All checks passed';
+                    overallStatusText = 'No checks found';
                 }
 
                 overallStatusEl.className = `text-2xl font-bold mt-1 flex items-center gap-2 status-${overallStatus}`;
                 overallStatusEl.innerHTML = getStatusIcon(overallStatus) + `<span>${overallStatusText}</span>`;
+
+                // Update progress bar
+                const totalChecks = relevantChecks.length;
+                const passedChecks = relevantChecks.filter(item => 
+                    item.conclusion === 'success' || item.state === 'success' || (item.status === 'completed' && item.conclusion === 'success')
+                ).length;
+                const progressPercentage = totalChecks > 0 ? (passedChecks / totalChecks) * 100 : 0;
+                progressBar.style.width = `${progressPercentage}%`;
+                progressText.textContent = `${passedChecks}/${totalChecks} required checks passed`;
+
 
                 // Render checks and actions table
                 checksAndActionsBody.innerHTML = '';
@@ -273,7 +309,8 @@
                         const statusIcon = getStatusIcon(status);
                         const name = item.context || item.name || item.workflow_name || 'N/A';
                         const time = new Date(item.created_at).toLocaleString();
-                        const link = item.html_url || item.target_url;
+                        // Prioritize html_url, then target_url, otherwise fall back to the main actions page
+                        const link = item.html_url || item.target_url || `https://github.com/${repo}/actions/runs?branch=${branch}`;
 
                         const row = `
                             <tr class="hover:bg-gray-700 transition-colors duration-200">
@@ -295,20 +332,23 @@
             }
 
             function getStatusClass(status) {
-                if (status === 'success' || status === 'completed') return 'status-success';
-                if (status === 'failure' || status === 'cancelled' || status === 'stale' || status === 'error' || status === 'failure') return 'status-failure';
+                const s = (status || '').toLowerCase();
+                if (s === 'success' || s === 'completed') return 'status-success';
+                if (s === 'failure' || s === 'cancelled' || s === 'stale' || s === 'error' || s === 'failure') return 'status-failure';
                 return 'status-pending';
             }
 
             function getStatusIcon(status) {
-                if (status === 'success' || status === 'completed') return '✅';
-                if (status === 'failure' || status === 'cancelled' || status === 'stale' || status === 'error' || status === 'failure') return '❌';
+                const s = (status || '').toLowerCase();
+                if (s === 'success' || s === 'completed') return '✅';
+                if (s === 'failure' || s === 'cancelled' || s === 'stale' || s === 'error' || s === 'failure') return '❌';
                 return '⏳';
             }
 
             // Initial fetch if a repo is saved
             if (repoInput.value) {
-                fetchData(repoInput.value, branchInput.value, tokenInput.value);
+                const requiredChecks = requiredChecksInput.value.trim().split(',').map(s => s.trim().toLowerCase()).filter(s => s);
+                fetchData(repoInput.value, branchInput.value, tokenInput.value, requiredChecks);
             }
         });
     </script>
