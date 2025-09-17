@@ -29,13 +29,28 @@
         .status-pending {
             color: #f59e0b; /* amber-500 */
         }
+        .progress-bar-transition {
+            transition: width 0.5s ease-in-out;
+        }
+        .message-box {
+            transition: transform 0.3s ease-in-out, opacity 0.3s ease-in-out;
+            transform: translateY(-20px);
+            opacity: 0;
+        }
+        .message-box.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
     </style>
 </head>
 <body class="p-4 sm:p-8 flex items-center justify-center min-h-screen">
 
     <div class="container mx-auto p-6 rounded-2xl card w-full max-w-4xl">
-        <h1 class="text-3xl sm:text-4xl font-bold text-center mb-6 text-gray-100">Repo Health Dashboard</h1>
-        <p class="text-center text-gray-400 mb-8">Get a quick overview of your GitHub repository's status.</p>
+        <h1 class="text-3xl sm:text-4xl font-bold text-center mb-2 text-gray-100">Repo Health Dashboard</h1>
+        <p class="text-center text-gray-400 mb-8 flex flex-col sm:flex-row justify-center items-center gap-2">
+            <span>Get a quick overview of your GitHub repository's status.</span>
+            <span id="lastUpdated" class="text-xs text-gray-500"></span>
+        </p>
 
         <!-- Input Section -->
         <div class="bg-gray-800 p-6 rounded-xl mb-8 flex flex-col sm:flex-row gap-4">
@@ -74,8 +89,8 @@
             </div>
         </div>
 
-        <div id="error" class="bg-red-900 p-4 rounded-lg my-8 text-center text-red-300 hidden">
-            <p>An error occurred. Please check the repo name and your personal access token.</p>
+        <div id="messageBox" class="message-box fixed top-4 right-4 p-4 rounded-lg shadow-lg flex items-center space-x-2 z-50">
+            <p id="messageText" class="text-sm font-medium"></p>
         </div>
 
         <div id="dashboard" class="space-y-6 hidden">
@@ -100,7 +115,7 @@
                     <p class="text-gray-400">Overall Status:</p>
                     <p id="overallStatus" class="text-2xl font-bold mt-1 flex items-center gap-2"></p>
                     <div id="progressBarContainer" class="w-full bg-gray-700 rounded-full h-2.5 mt-2">
-                        <div id="progressBar" class="bg-blue-600 h-2.5 rounded-full" style="width: 0%;"></div>
+                        <div id="progressBar" class="bg-blue-600 h-2.5 rounded-full progress-bar-transition" style="width: 0%;"></div>
                     </div>
                     <p id="progressText" class="text-sm text-gray-400 mt-1"></p>
                 </div>
@@ -168,6 +183,10 @@
             const progressBar = document.getElementById('progressBar');
             const progressText = document.getElementById('progressText');
             const viewAllLink = document.getElementById('viewAllLink');
+            const lastUpdatedEl = document.getElementById('lastUpdated');
+            const messageBox = document.getElementById('messageBox');
+            const messageText = document.getElementById('messageText');
+            let fetchIntervalId = null;
 
             // Load saved values from localStorage
             repoInput.value = localStorage.getItem('githubRepo') || 'rhodge-hash/health';
@@ -182,8 +201,13 @@
                 const requiredChecks = requiredChecksInput.value.trim().split(',').map(s => s.trim().toLowerCase()).filter(s => s);
 
                 if (!repo || !branch) {
-                    alert('Please enter a GitHub repository name and a branch name.');
+                    showMessage('Please enter a GitHub repository name and a branch name.', 'error');
                     return;
+                }
+
+                // Clear previous interval
+                if (fetchIntervalId) {
+                    clearInterval(fetchIntervalId);
                 }
 
                 // Save values to localStorage for persistence
@@ -192,12 +216,30 @@
                 localStorage.setItem('githubToken', token);
                 localStorage.setItem('githubRequiredChecks', requiredChecksInput.value.trim());
                 
+                // Start a new interval for periodic fetching
                 fetchData(repo, branch, token, requiredChecks);
+                fetchIntervalId = setInterval(() => {
+                    fetchData(repo, branch, token, requiredChecks);
+                }, 10000); // Refresh every 10 seconds
             });
+
+            function showMessage(text, type = 'info') {
+                messageText.textContent = text;
+                messageBox.classList.remove('bg-red-900', 'text-red-300', 'bg-blue-900', 'text-blue-300');
+                if (type === 'error') {
+                    messageBox.classList.add('bg-red-900', 'text-red-300');
+                } else {
+                    messageBox.classList.add('bg-blue-900', 'text-blue-300');
+                }
+                messageBox.classList.add('show');
+                setTimeout(() => {
+                    messageBox.classList.remove('show');
+                }, 3000);
+            }
+
 
             async function fetchData(repo, branch, token, requiredChecks) {
                 loading.classList.remove('hidden');
-                errorDiv.classList.add('hidden');
                 dashboard.classList.add('hidden');
                 instructionsDiv.classList.add('hidden');
 
@@ -231,11 +273,11 @@
                     const workflowsData = await workflowsRes.json();
 
                     renderDashboard(repo, branch, latestCommitSha, statusesData, checksData, workflowsData, requiredChecks);
+                    lastUpdatedEl.textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
 
                 } catch (err) {
                     console.error('API Fetch Error:', err);
-                    errorDiv.querySelector('p').textContent = `An error occurred: ${err.message}`;
-                    errorDiv.classList.remove('hidden');
+                    showMessage(`An error occurred: ${err.message}`, 'error');
                     dashboard.classList.add('hidden');
                 } finally {
                     loading.classList.add('hidden');
@@ -254,10 +296,10 @@
                 
                 // Combine and sort all data sources
                 const allChecksAndActions = [
-                    ...(statusesData || []).map(item => ({ ...item, type: 'status' })),
-                    ...(checksData.check_runs || []).map(item => ({ ...item, type: 'check_run' })),
-                    ...(workflowsData.workflow_runs || []).map(item => ({ ...item, type: 'workflow_run' }))
-                ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)); // Sort by time
+                    ...(statusesData || []).map(item => ({ ...item, type: 'status', time: item.created_at })),
+                    ...(checksData.check_runs || []).map(item => ({ ...item, type: 'check_run', time: item.started_at })),
+                    ...(workflowsData.workflow_runs || []).map(item => ({ ...item, type: 'workflow_run', time: item.created_at }))
+                ].sort((a, b) => new Date(b.time) - new Date(a.time)); // Sort by time
 
                 // Filter based on required checks
                 const relevantChecks = requiredChecks.length > 0 ?
@@ -275,7 +317,7 @@
                     if (status === 'success' || status === 'completed') {
                         overallStatus = 'success';
                         overallStatusText = 'All required checks passed';
-                    } else if (status === 'failure' || status === 'cancelled' || status === 'stale' || status === 'error') {
+                    } else if (status === 'failure' || status === 'cancelled' || status === 'stale' || status === 'error' || status === 'failure') {
                         overallStatus = 'failure';
                         overallStatusText = 'A required check failed';
                     } else {
@@ -284,18 +326,24 @@
                     }
                 } else {
                     overallStatus = 'pending';
-                    overallStatusText = 'No checks found';
+                    overallStatusText = 'No required checks found';
                 }
 
                 overallStatusEl.className = `text-2xl font-bold mt-1 flex items-center gap-2 status-${overallStatus}`;
                 overallStatusEl.innerHTML = getStatusIcon(overallStatus) + `<span>${overallStatusText}</span>`;
 
                 // Update progress bar
-                const totalChecks = relevantChecks.length;
+                const totalChecks = requiredChecks.length;
                 const passedChecks = relevantChecks.filter(item => 
-                    item.conclusion === 'success' || item.state === 'success' || (item.status === 'completed' && item.conclusion === 'success')
+                    requiredChecks.some(name => (item.context || item.name || item.workflow_name || '').toLowerCase().includes(name)) &&
+                    (item.conclusion === 'success' || item.state === 'success' || (item.status === 'completed' && item.conclusion === 'success'))
                 ).length;
-                const progressPercentage = totalChecks > 0 ? (passedChecks / totalChecks) * 100 : 0;
+                
+                let progressPercentage = 0;
+                if (totalChecks > 0) {
+                    progressPercentage = (passedChecks / totalChecks) * 100;
+                }
+                
                 progressBar.style.width = `${progressPercentage}%`;
                 progressText.textContent = `${passedChecks}/${totalChecks} required checks passed`;
 
@@ -308,7 +356,7 @@
                         const statusClass = getStatusClass(status);
                         const statusIcon = getStatusIcon(status);
                         const name = item.context || item.name || item.workflow_name || 'N/A';
-                        const time = new Date(item.created_at).toLocaleString();
+                        const time = new Date(item.time).toLocaleString();
                         // Prioritize html_url, then target_url, otherwise fall back to the main actions page
                         const link = item.html_url || item.target_url || `https://github.com/${repo}/actions/runs?branch=${branch}`;
 
@@ -334,14 +382,14 @@
             function getStatusClass(status) {
                 const s = (status || '').toLowerCase();
                 if (s === 'success' || s === 'completed') return 'status-success';
-                if (s === 'failure' || s === 'cancelled' || s === 'stale' || s === 'error' || s === 'failure') return 'status-failure';
+                if (s === 'failure' || s === 'cancelled' || s === 'stale' || s === 'error') return 'status-failure';
                 return 'status-pending';
             }
 
             function getStatusIcon(status) {
                 const s = (status || '').toLowerCase();
                 if (s === 'success' || s === 'completed') return '✅';
-                if (s === 'failure' || s === 'cancelled' || s === 'stale' || s === 'error' || s === 'failure') return '❌';
+                if (s === 'failure' || s === 'cancelled' || s === 'stale' || s === 'error') return '❌';
                 return '⏳';
             }
 
@@ -349,6 +397,9 @@
             if (repoInput.value) {
                 const requiredChecks = requiredChecksInput.value.trim().split(',').map(s => s.trim().toLowerCase()).filter(s => s);
                 fetchData(repoInput.value, branchInput.value, tokenInput.value, requiredChecks);
+                fetchIntervalId = setInterval(() => {
+                    fetchData(repoInput.value, branchInput.value, tokenInput.value, requiredChecks);
+                }, 10000); // Refresh every 10 seconds
             }
         });
     </script>
