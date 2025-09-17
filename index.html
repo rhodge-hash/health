@@ -44,6 +44,10 @@
                 <input type="text" id="repoInput" placeholder="Enter repo name" class="w-full p-2 rounded-lg bg-gray-700 text-white border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500">
             </div>
             <div class="flex-1">
+                <label for="branchInput" class="block text-sm font-medium text-gray-300 mb-1">Branch Name</label>
+                <input type="text" id="branchInput" value="main" placeholder="e.g., main" class="w-full p-2 rounded-lg bg-gray-700 text-white border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <div class="flex-1">
                 <label for="tokenInput" class="block text-sm font-medium text-gray-300 mb-1">Personal Access Token (optional)</label>
                 <input type="password" id="tokenInput" placeholder="Paste your token here" class="w-full p-2 rounded-lg bg-gray-700 text-white border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500">
             </div>
@@ -77,6 +81,10 @@
                     <div>
                         <p class="text-gray-400">Name:</p>
                         <p id="repoName" class="text-lg font-medium"></p>
+                    </div>
+                    <div>
+                        <p class="text-gray-400">Branch:</p>
+                        <p id="branchName" class="text-lg font-medium"></p>
                     </div>
                     <div>
                         <p class="text-gray-400">Latest Commit:</p>
@@ -130,6 +138,7 @@
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             const repoInput = document.getElementById('repoInput');
+            const branchInput = document.getElementById('branchInput');
             const tokenInput = document.getElementById('tokenInput');
             const fetchBtn = document.getElementById('fetchBtn');
             const dashboard = document.getElementById('dashboard');
@@ -139,31 +148,35 @@
             
             // Dashboard elements
             const repoNameEl = document.getElementById('repoName');
+            const branchNameEl = document.getElementById('branchName');
             const latestCommitEl = document.getElementById('latestCommit');
             const overallStatusEl = document.getElementById('overallStatus');
             const checksAndActionsBody = document.getElementById('checksAndActionsBody');
 
             // Load saved values from localStorage
             repoInput.value = localStorage.getItem('githubRepo') || '';
+            branchInput.value = localStorage.getItem('githubBranch') || 'main';
             tokenInput.value = localStorage.getItem('githubToken') || '';
 
             fetchBtn.addEventListener('click', () => {
                 const repo = repoInput.value.trim();
+                const branch = branchInput.value.trim();
                 const token = tokenInput.value.trim();
 
-                if (!repo) {
-                    alert('Please enter a GitHub repository name.');
+                if (!repo || !branch) {
+                    alert('Please enter a GitHub repository name and a branch name.');
                     return;
                 }
 
                 // Save values to localStorage for persistence
                 localStorage.setItem('githubRepo', repo);
+                localStorage.setItem('githubBranch', branch);
                 localStorage.setItem('githubToken', token);
                 
-                fetchData(repo, token);
+                fetchData(repo, branch, token);
             });
 
-            async function fetchData(repo, token) {
+            async function fetchData(repo, branch, token) {
                 loading.classList.remove('hidden');
                 errorDiv.classList.add('hidden');
                 dashboard.classList.add('hidden');
@@ -176,52 +189,66 @@
 
                 try {
                     // Fetch latest commit
-                    const commitRes = await fetch(`https://api.github.com/repos/${repo}/commits?per_page=1`, { headers });
-                    if (!commitRes.ok) throw new Error('Failed to fetch commit.');
+                    const commitRes = await fetch(`https://api.github.com/repos/${repo}/commits/${branch}`, { headers });
+                    if (!commitRes.ok) {
+                        if (commitRes.status === 404) {
+                            throw new Error(`Branch '${branch}' not found for this repository.`);
+                        }
+                        throw new Error('Failed to fetch commit.');
+                    }
                     const commitData = await commitRes.json();
-                    const latestCommitSha = commitData[0]?.sha;
+                    const latestCommitSha = commitData.sha;
 
+                    // Fetch commit statuses
+                    const statusesRes = await fetch(`https://api.github.com/repos/${repo}/commits/${latestCommitSha}/statuses`, { headers });
+                    const statusesData = await statusesRes.json();
+                    
                     // Fetch check runs for the latest commit
                     const checksRes = await fetch(`https://api.github.com/repos/${repo}/commits/${latestCommitSha}/check-runs`, { headers });
                     const checksData = await checksRes.json();
                     
                     // Fetch workflow runs for the latest commit
-                    const workflowsRes = await fetch(`https://api.github.com/repos/${repo}/actions/runs?branch=main&per_page=5`, { headers });
+                    const workflowsRes = await fetch(`https://api.github.com/repos/${repo}/actions/runs?branch=${branch}&per_page=5`, { headers });
                     const workflowsData = await workflowsRes.json();
 
-                    renderDashboard(repo, latestCommitSha, checksData, workflowsData);
+                    renderDashboard(repo, branch, latestCommitSha, statusesData, checksData, workflowsData);
 
                 } catch (err) {
                     console.error('API Fetch Error:', err);
+                    errorDiv.querySelector('p').textContent = `An error occurred: ${err.message}`;
                     errorDiv.classList.remove('hidden');
+                    dashboard.classList.add('hidden');
                 } finally {
                     loading.classList.add('hidden');
                 }
             }
 
-            function renderDashboard(repo, commitSha, checksData, workflowsData) {
+            function renderDashboard(repo, branch, commitSha, statusesData, checksData, workflowsData) {
                 // Show dashboard and hide instructions
                 dashboard.classList.remove('hidden');
                 instructionsDiv.classList.add('hidden');
 
                 repoNameEl.textContent = repo;
+                branchNameEl.textContent = branch;
                 latestCommitEl.textContent = commitSha ? commitSha.substring(0, 7) : 'N/A';
                 
                 let overallStatus = 'pending';
                 let overallStatusText = 'Pending...';
                 
+                // Combine and sort all data sources
                 const allChecksAndActions = [
-                    ...(checksData.check_runs || []),
-                    ...(workflowsData.workflow_runs || [])
+                    ...(statusesData || []).map(item => ({ ...item, type: 'status' })),
+                    ...(checksData.check_runs || []).map(item => ({ ...item, type: 'check_run' })),
+                    ...(workflowsData.workflow_runs || []).map(item => ({ ...item, type: 'workflow_run' }))
                 ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)); // Sort by time
 
                 // Determine overall status
                 const hasFailed = allChecksAndActions.some(item => 
-                    (item.conclusion === 'failure' || item.conclusion === 'cancelled' || item.conclusion === 'stale') ||
+                    (item.conclusion === 'failure' || item.conclusion === 'cancelled' || item.conclusion === 'stale' || item.state === 'error' || item.state === 'failure') ||
                     (item.status === 'completed' && item.conclusion !== 'success')
                 );
-                const hasPending = allChecksAndActions.some(item => item.status !== 'completed');
-                const hasSucceeded = allChecksAndActions.some(item => item.conclusion === 'success');
+                const hasPending = allChecksAndActions.some(item => item.status !== 'completed' || item.state === 'pending' || item.state === 'in_progress');
+                const hasSucceeded = allChecksAndActions.some(item => item.conclusion === 'success' || item.state === 'success');
                 
                 if (hasFailed) {
                     overallStatus = 'failure';
@@ -241,12 +268,12 @@
                 checksAndActionsBody.innerHTML = '';
                 if (allChecksAndActions.length > 0) {
                     allChecksAndActions.forEach(item => {
-                        const status = item.conclusion || item.status;
+                        const status = item.conclusion || item.status || item.state;
                         const statusClass = getStatusClass(status);
                         const statusIcon = getStatusIcon(status);
-                        const name = item.name || item.workflow_name || 'N/A';
+                        const name = item.context || item.name || item.workflow_name || 'N/A';
                         const time = new Date(item.created_at).toLocaleString();
-                        const link = item.html_url || item.url.replace('api.github.com/repos', 'github.com');
+                        const link = item.html_url || item.target_url;
 
                         const row = `
                             <tr class="hover:bg-gray-700 transition-colors duration-200">
@@ -263,25 +290,25 @@
                         checksAndActionsBody.innerHTML += row;
                     });
                 } else {
-                    checksAndActionsBody.innerHTML = `<tr><td colspan="4" class="text-center py-4 text-gray-400">No recent checks or actions found.</td></tr>`;
+                    checksAndActionsBody.innerHTML = `<tr><td colspan="4" class="text-center py-4 text-gray-400">No recent checks or actions found for this branch.</td></tr>`;
                 }
             }
 
             function getStatusClass(status) {
                 if (status === 'success' || status === 'completed') return 'status-success';
-                if (status === 'failure' || status === 'cancelled' || status === 'stale') return 'status-failure';
+                if (status === 'failure' || status === 'cancelled' || status === 'stale' || status === 'error' || status === 'failure') return 'status-failure';
                 return 'status-pending';
             }
 
             function getStatusIcon(status) {
                 if (status === 'success' || status === 'completed') return '✅';
-                if (status === 'failure' || status === 'cancelled' || status === 'stale') return '❌';
+                if (status === 'failure' || status === 'cancelled' || status === 'stale' || status === 'error' || status === 'failure') return '❌';
                 return '⏳';
             }
 
             // Initial fetch if a repo is saved
             if (repoInput.value) {
-                fetchData(repoInput.value, tokenInput.value);
+                fetchData(repoInput.value, branchInput.value, tokenInput.value);
             }
         });
     </script>
